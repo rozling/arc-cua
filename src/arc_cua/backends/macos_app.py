@@ -383,8 +383,7 @@ class _InputScope:
     def __enter__(self) -> None:
         self.app.check_running()
         front = background.front_pid()
-        if front is not None and front != self.app.pid:
-            self.app._user_pid = front
+        self.app._user_pid = front if front is not None and front != self.app.pid else None
         self.app._last_input = time.monotonic()
 
     def __exit__(self, *exc: Any) -> None:

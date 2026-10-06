@@ -413,3 +413,13 @@ also checks that no action moved the user's pointer or changed their front app.
 - Pointer input (`click_at`, and clicks on controls that offer no press action)
   takes about 200 ms, for the event sequence browsers require.
 - Windows on another desktop (Space) are not reachable; the driver says so.
+
+### Background pointer coordinates
+
+Public `click_at`, `drag`, and `scroll_at` points are relative to the target window.
+Background events keep their normal CGEvent location in global screen coordinates
+and stamp the WindowServer window-location field relative to the target origin.
+The origin is resolved once per operation for the exact process and window;
+missing or non-finite geometry refuses input. Negative display origins are valid.
+The Chromium activation primer stays at window-local `(-1, -1)`, outside the
+target window, with its global point derived from the same origin.
