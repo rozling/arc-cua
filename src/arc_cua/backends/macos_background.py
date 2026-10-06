@@ -324,12 +324,34 @@ def _post(event: Any, pid: int, *, authenticate: bool = False) -> None:
     sl.SLEventPostToPid(pid, pointer)
 
 
-def _address_to_window(event: Any, window: int, point: tuple[float, float]) -> None:
+def _window_origin(Q: Any, pid: int, window: int) -> tuple[float, float]:
+    """Resolve the exact target once per pointer operation; missing geometry refuses input."""
+    rows = Q.CGWindowListCopyWindowInfo(Q.kCGWindowListOptionIncludingWindow, window) or []
+    matches = [row for row in rows
+               if row.get(Q.kCGWindowNumber) == window and row.get(Q.kCGWindowOwnerPID) == pid]
+    try:
+        if len(matches) != 1:
+            raise ValueError("missing or ambiguous window")
+        bounds = matches[0][Q.kCGWindowBounds]
+        origin = (float(bounds["X"]), float(bounds["Y"]))
+        if not all(math.isfinite(value) for value in origin):
+            raise ValueError("non-finite origin")
+        return origin
+    except (KeyError, TypeError, ValueError) as exc:
+        raise UnsupportedDesktopAction("Cannot establish target window origin") from exc
+
+
+def _address_to_window(
+    event: Any, window: int, screen_point: tuple[float, float], window_origin: tuple[float, float],
+) -> None:
+    """Stamp window-local coordinates without changing the event's global location."""
     sl = _sl()
     pointer = _pointer(event)
     for field in _FIELD_WINDOW_IDS:
         sl.SLEventSetIntegerValueField(pointer, field, window)
-    sl.CGEventSetWindowLocation(pointer, point[0], point[1])
+    sl.CGEventSetWindowLocation(
+        pointer, screen_point[0] - window_origin[0], screen_point[1] - window_origin[1],
+    )
 
 
 def click(
@@ -348,6 +370,7 @@ def click(
     the target.
     """
     Q = _quartz()
+    origin = _window_origin(Q, pid, window)
     with borrowed_focus(pid, window):
         source = Q.CGEventSourceCreate(Q.kCGEventSourceStateHIDSystemState)
         group = time.monotonic_ns() & 0x7FFF_FFFF
@@ -369,12 +392,13 @@ def click(
             sl.SLEventSetIntegerValueField(pointer, _FIELD_SUBTYPE, 3)
             sl.SLEventSetIntegerValueField(pointer, _FIELD_TARGET_PID, pid)
             sl.SLEventSetIntegerValueField(pointer, _FIELD_GROUP, group)
-            _address_to_window(event, window, location)
+            _address_to_window(event, window, location, origin)
             _post(event, pid)
             if delay:
                 time.sleep(delay)
 
-        offscreen = (-1.0, -1.0)
+        # Keep the primer outside this window even on a negative-origin display.
+        offscreen = (origin[0] - 1.0, origin[1] - 1.0)
         emit(Q.kCGEventMouseMoved, point, phase=2, clicks=0, delay=0.015)
         if not right:
             emit(Q.kCGEventLeftMouseDown, offscreen, phase=1, clicks=1, delay=0.001)
@@ -400,6 +424,7 @@ def drag_path(pid: int, window: int, points: list[tuple[float, float]], *, step_
     start = points[0]
     end = points[-1]
     Q = _quartz()
+    origin = _window_origin(Q, pid, window)
     with borrowed_focus(pid, window):
         source = Q.CGEventSourceCreate(Q.kCGEventSourceStateHIDSystemState)
         group = time.monotonic_ns() & 0x7FFF_FFFF
@@ -416,7 +441,7 @@ def drag_path(pid: int, window: int, points: list[tuple[float, float]], *, step_
             sl.SLEventSetIntegerValueField(pointer, _FIELD_SUBTYPE, 3)
             sl.SLEventSetIntegerValueField(pointer, _FIELD_TARGET_PID, pid)
             sl.SLEventSetIntegerValueField(pointer, _FIELD_GROUP, group)
-            _address_to_window(event, window, location)
+            _address_to_window(event, window, location, origin)
             _post(event, pid)
             time.sleep(delay)
 
@@ -436,11 +461,12 @@ def scroll(pid: int, window: int, point: tuple[float, float], *, dx: int = 0, dy
     """Scroll by pixels at ``point``; positive ``dy`` scrolls up, positive ``dx`` left."""
     ensure_available()
     Q = _quartz()
+    origin = _window_origin(Q, pid, window)
     event = Q.CGEventCreateScrollWheelEvent(None, Q.kCGScrollEventUnitPixel, 2, dy, dx)
     if event is None:
         raise UnsupportedDesktopAction("Cannot create scroll event")
     Q.CGEventSetLocation(event, point)
-    _address_to_window(event, window, point)
+    _address_to_window(event, window, point, origin)
     _post(event, pid)
 
 
