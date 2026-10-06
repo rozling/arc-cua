@@ -403,6 +403,28 @@ ARC_UPDATE_GOLDEN=1 python -m pytest tests/test_golden_requests.py
 
 A further test checks that no golden file contains the secret input's value.
 
+## Bounded TypeSafe provider projection
+
+`TypeSafeJevPolicy` uses compact UTF-8 JSON byte accounting (`ensure_ascii=False`,
+compact separators and `allow_nan=False`) before sending a request. It applies
+conservative 24,000-byte state-plus-longest-question and 48,000-byte complete-body
+ceilings; these are engineering margins, not a documented provider tokenizer.
+When a full snapshot exceeds them, it keeps candidate closure, focused/selected and
+relevant controls, useful ancestors and relevant non-actionable state, then adds
+optional context deterministically. Every offered candidate remains present in the
+projected state. An unrepresentable essential closure raises
+`provider_context_unrepresentable` before HTTP.
+
+A partial projection deliberately cannot establish completion: even a returned
+`SUBTASK_COMPLETE` is converted to `NEEDS_AGENT`. The executor still keeps and
+uses the original trusted snapshot for freshness, materialization and semantic
+guards; packing never rewrites that snapshot.
+
+Task literals contribute through the same word-ranking semantics as other task
+text. Numeric `0` and boolean `False` are preserved losslessly whenever their
+element is selected by candidate, task, or context closure; they are not alone a
+generic relevance signal, since many unrelated desktop readouts share those values.
+
 ## Risky controls and secrets
 
 `arc_cua.safety` holds the risk vocabulary and redaction. A control's risk comes
