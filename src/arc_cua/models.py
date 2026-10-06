@@ -8,6 +8,7 @@ from hashlib import sha256
 from types import MappingProxyType
 from typing import Any, Callable, Mapping, Sequence
 
+from .contracts import DecisionContract, parse_contract
 from .keyboard import parse_hotkey
 from .safety import RISK_CATEGORIES, SECRET_PLACEHOLDER, redact
 
@@ -162,6 +163,7 @@ class Subtask:
     allowed_risks: tuple[str, ...] = ()
     # Input keys whose values the decision model never sees; arc still enters the real value.
     secret_inputs: tuple[str, ...] = ()
+    decision_contract: DecisionContract | Mapping[str, Any] | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.goal, str) or not self.goal.strip():
@@ -208,6 +210,10 @@ class Subtask:
         unknown_secrets = set(self.secret_inputs) - set(self.inputs)
         if unknown_secrets:
             raise ValueError(f"Subtask.secret_inputs names keys that are not inputs: {sorted(unknown_secrets)}")
+        if self.decision_contract is not None:
+            object.__setattr__(
+                self, "decision_contract", parse_contract(self.decision_contract, inputs, len(self.verification))
+            )
 
     @property
     def secret_values(self) -> tuple[str, ...]:
@@ -217,7 +223,7 @@ class Subtask:
 
     def compact(self) -> dict[str, Any]:
         """The model-facing subtask: secret input values are replaced by a placeholder."""
-        return {
+        data = {
             "goal": self.goal,
             "verification": list(self.verification),
             "inputs": {
@@ -228,6 +234,9 @@ class Subtask:
             "shortcuts": dict(self.shortcuts),
             "allowed_risks": list(self.allowed_risks),
         }
+        if self.decision_contract is not None:
+            data["decision_contract"] = redact(self.decision_contract.compact(), self.secret_values)
+        return data
 
 
 @dataclass(frozen=True, slots=True)
