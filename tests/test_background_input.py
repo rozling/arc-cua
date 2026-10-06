@@ -128,6 +128,26 @@ def test_parked_window_must_be_on_the_invisible_display():
     assert not _on_display(None, display)
 
 
+@pytest.mark.parametrize("front", [42, None])
+def test_new_input_scope_forgets_previous_front_app(monkeypatch, front):
+    app, _ = fake_target(monkeypatch)
+    activated = []
+    user_app = SimpleNamespace(activateWithOptions_=lambda options: activated.append(options))
+    monkeypatch.setitem(__import__("sys").modules, "AppKit", SimpleNamespace(
+        NSRunningApplication=SimpleNamespace(runningApplicationWithProcessIdentifier_=lambda pid: user_app)))
+    # A is frontmost while arc drives B in the background.
+    with app.input_scope():
+        pass
+    assert app._user_pid == 7
+    # The user deliberately raises B, or the foreground cannot be determined.
+    monkeypatch.setattr(macos_background, "front_pid", lambda: front)
+    with app.input_scope():
+        pass
+    assert app._user_pid is None
+    app.keep_behind()
+    assert activated == []
+
+
 def test_runtime_reports_a_quit_app_instead_of_a_generic_failure():
     class QuitBackend:
         def observe(self):
