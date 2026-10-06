@@ -188,6 +188,9 @@ class ChoicePolicy:
         snapshot: DesktopSnapshot,
         history: Sequence[ActionRecord],
     ) -> Decision:
+        if subtask.decision_contract is not None:
+            from .bounded import decide as bounded_decide
+            return bounded_decide(self, subtask, snapshot, history)
         questions, candidate_maps, meta = self._build_questions(subtask, snapshot)
         secrets = subtask.secret_values
         state = {

@@ -2,6 +2,9 @@
 
 Detailed notes on perception, execution, and safety mechanisms.
 
+For caller-authored control bindings, complete action proposals and criterion-specific
+local checks, see [explicit bounded task decisions](bounded-task-decisions.md).
+
 ---
 
 ## Desktop snapshot
