@@ -420,6 +420,11 @@ A partial projection deliberately cannot establish completion: even a returned
 uses the original trusted snapshot for freshness, materialization and semantic
 guards; packing never rewrites that snapshot.
 
+Task literals contribute through the same word-ranking semantics as other task
+text. Numeric `0` and boolean `False` are preserved losslessly whenever their
+element is selected by candidate, task, or context closure; they are not alone a
+generic relevance signal, since many unrelated desktop readouts share those values.
+
 ## Risky controls and secrets
 
 `arc_cua.safety` holds the risk vocabulary and redaction. A control's risk comes

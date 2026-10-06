@@ -8,12 +8,11 @@ the answers into a Decision. A ChoiceTransport sends them to a decision model
 from __future__ import annotations
 
 import math
-import re
 import time
 from copy import deepcopy
 from typing import Any, Mapping, Protocol, Sequence
 
-from .packing import closure, relevant, task_words
+from .packing import closure, element_words, rank, relevant, task_words
 
 from ..models import (
     CLICK_MODIFIERS,
@@ -208,6 +207,8 @@ class ChoicePolicy:
             )
 
         counts = {name: len(question["criteria"]) for name, question in questions.items()}
+        packing_counts = getattr(self, "_packing_counts", (0, 0, 0))
+        packing_accounting = self._account(state, questions, *packing_counts, candidate_maps) if self.provider_budget else None
         started = time.perf_counter()
         if self.screenshot_steps:
             # Every decision sees the pixels its elements were read from.
@@ -217,7 +218,7 @@ class ChoicePolicy:
             result = self.transport.ask(state, questions)
         latency_ms = round((time.perf_counter() - started) * 1000)
         answers = result.get("answers", {})
-        result = {**result, "candidate_counts": counts}
+        result = {**result, "candidate_counts": counts, "provider_packing": packing_accounting}
         # A decision is only as confident, and as decisive, as the weakest answer it uses.
         used: list[float] = []
         margins: list[float] = []
@@ -340,11 +341,26 @@ class ChoicePolicy:
         """Bound TypeSafe's coherent state/questions without changing non-opted-in transports."""
         max_state_longest, max_request = self.provider_budget or (0, 0)
         if self._within_budget(state, questions, max_state_longest, max_request):
+            words = task_words(subtask)
+            offered = {element_id for name, choices in candidate_maps.items()
+                       if name.endswith("_target") or name.endswith("_destination") for element_id in choices}
+            required = closure(snapshot.elements, offered, words)
+            visible = len([e for e in snapshot.elements if e.visible])
+            self._packing_counts = (len(required), visible - len(required), 0)
             return questions, candidate_maps, state
         words = task_words(subtask)
+        last_state: Mapping[str, Any] = state
+        last_questions: Mapping[str, Any] = questions
+        last_required = 0
         # Prune only optional original candidates. Input heads/literals are never
         # regenerated or capped here.
-        for limit in range(min(self.max_candidates, len(snapshot.elements)), 0, -1):
+        limits = []
+        limit = min(self.max_candidates, len(snapshot.elements))
+        while limit > 1:
+            limits.append(limit)
+            limit = max(1, limit // 2)
+        limits.append(1)
+        for limit in limits:
             trial_q, trial_maps, trial_meta = self._prune_candidate_heads(questions, candidate_maps, meta, snapshot, words, limit)
             ids = {element_id for name, choices in trial_maps.items()
                    if name.endswith("_target") or name.endswith("_destination") for element_id in choices}
@@ -353,23 +369,28 @@ class ChoicePolicy:
             essentials = [e for e in ordered if e.id in required]
             # Essential overflow fails closed: optional state cannot repair it.
             trial_state = self._state_for_elements(subtask, snapshot, history, trial_meta, essentials, partial=len(essentials) < len(ordered))
+            last_state, last_questions, last_required = trial_state, trial_q, len(required)
             if not self._within_budget(trial_state, trial_q, max_state_longest, max_request):
                 continue
             kept = list(essentials)
             optional = [(index, element) for index, element in enumerate(ordered) if element.id not in required]
             parents = {e.parent_id for e in essentials if e.parent_id}
-            optional.sort(key=lambda item: (0 if relevant(item[1], words) else 1,
+            optional.sort(key=lambda item: (-len(element_words(item[1]) & words),
                                              0 if item[1].actions else 1,
                                              0 if item[1].parent_id in parents else 1, item[0]))
             for _, element in optional:
                 bundle_ids = closure(snapshot.elements, required | {element.id}, words)
                 candidate = [row for row in ordered if row.id in ({e.id for e in kept} | bundle_ids)]
                 candidate_state = self._state_for_elements(subtask, snapshot, history, trial_meta, candidate, partial=len(candidate) < len(ordered))
-                if self._within_budget(candidate_state, trial_q, max_state_longest, max_request):
+                if self._within_budget(candidate_state, trial_q, int(max_state_longest * .8), int(max_request * .8)):
                     kept = candidate
+            self._packing_counts = (len(required), len(kept) - len(required), len(ordered) - len(kept))
             return trial_q, trial_maps, self._state_for_elements(subtask, snapshot, history, trial_meta, kept, partial=len(kept) < len(ordered))
+        metrics = self._account(last_state, last_questions, last_required, 0, len(snapshot.elements) - last_required, {})
         raise ProviderContextUnrepresentable("provider_context_unrepresentable: " +
-            f"mandatory={len(required)} visible={len(snapshot.elements)} state_plus_longest_limit={max_state_longest} request_limit={max_request}")
+            f"mandatory={metrics['mandatory_elements']} state_bytes={metrics['state_bytes']} "
+            f"longest_question_bytes={metrics['longest_question_bytes']} state_plus_longest={metrics['state_plus_longest_bytes']} "
+            f"complete_request_bytes={metrics['complete_request_bytes']} state_plus_longest_limit={max_state_longest} request_limit={max_request}")
 
     def _prune_candidate_heads(self, questions: dict[str, Any], maps: dict[str, dict[str, Any]], meta: dict[str, int],
                                snapshot: DesktopSnapshot, words: set[str], limit: int) -> tuple[dict[str, Any], dict[str, dict[str, Any]], dict[str, int]]:
@@ -381,10 +402,7 @@ class ChoicePolicy:
             ids = list(choices)
             essential = [element_id for element_id in ids if (element := by_id.get(element_id)) and
                          (element.focused or element.selected or relevant(element, words))]
-            ranked = sorted(enumerate(ids), key=lambda item: (
-                0 if (element := by_id.get(item[1])) and (element.focused or element.selected) else 1,
-                -len(_words((by_id[item[1]].name.split("\n", 1)[0] if by_id[item[1]].actions else by_id[item[1]].name) +
-                            (" " + str(by_id[item[1]].value) if by_id[item[1]].value is not None else "")) & words), item[0]))
+            ranked = sorted(enumerate(ids), key=lambda item: rank(by_id[item[1]], words, item[0]))
             chosen = list(dict.fromkeys([*essential, *(element_id for _, element_id in ranked[:max(1, limit)])]))
             result_maps[name] = {element_id: choices[element_id] for element_id in ids if element_id in chosen}
             question = name.lower()
@@ -411,11 +429,22 @@ class ChoicePolicy:
         body = {"model": self.request_model, "state": state, "questions": questions}
         return len(encode(body)) <= request_limit and len(encode(state)) + max(question_bytes, default=0) <= state_longest
 
+    def _account(self, state: Mapping[str, Any], questions: Mapping[str, Any], mandatory: int, optional: int, dropped: int,
+                 maps: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
+        import json
+        encode = lambda value: json.dumps(value, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode("utf-8")
+        state_bytes = len(encode(state)); longest = max((len(encode(q)) for q in questions.values()), default=0)
+        return {"state_bytes": state_bytes, "longest_question_bytes": longest, "state_plus_longest_bytes": state_bytes + longest,
+                "complete_request_bytes": len(encode({"model": self.request_model, "state": state, "questions": questions})),
+                "mandatory_elements": mandatory, "optional_elements": optional, "dropped_elements": dropped,
+                "candidate_counts": {name: len(value) for name, value in maps.items() if name.endswith("_target") or name.endswith("_destination")},
+                "state_plus_longest_limit": self.provider_budget[0] if self.provider_budget else None,
+                "request_limit": self.provider_budget[1] if self.provider_budget else None}
+
     def _build_questions(
         self,
         subtask: Subtask,
         snapshot: DesktopSnapshot,
-        candidate_limit: int | None = None,
     ) -> tuple[dict[str, Any], dict[str, dict[str, Any]], dict[str, int]]:
         elements_by_kind: dict[ActionKind, list[DesktopElement]] = {}
         for element in snapshot.elements:
@@ -450,7 +479,7 @@ class ChoicePolicy:
         for kind, elements in elements_by_kind.items():
             if kind == ActionKind.SET_VALUE and not subtask.inputs:
                 continue
-            kept = _cap(elements, candidate_limit or self.max_candidates, subtask)
+            kept = _cap(elements, self.max_candidates, subtask)
             if len(elements) > len(kept):
                 truncation[kind.value] = len(elements) - len(kept)
             operations[kind.value] = _operation_description(kind)
@@ -512,7 +541,7 @@ class ChoicePolicy:
 
         if ActionKind.DRAG_TO.value in operations:
             destinations = [e for e in snapshot.elements if e.visible and e.enabled and e.accepts_drop]
-            destinations = _cap(destinations, candidate_limit or self.max_candidates, subtask)
+            destinations = _cap(destinations, self.max_candidates, subtask)
             if destinations:
                 candidate_maps["DRAG_TO_destination"] = {e.id: e.compact() for e in destinations}
                 questions["drag_to_destination"] = {
@@ -682,13 +711,6 @@ def _element_table(elements: Sequence[DesktopElement]) -> dict[str, Any]:
     }
 
 
-_WORD = re.compile(r"[^\W_]{3,}", re.UNICODE)
-
-
-def _words(text: str) -> set[str]:
-    return {word.casefold() for word in _WORD.findall(text)}
-
-
 def _cap(elements: list[DesktopElement], limit: int, subtask: Subtask) -> list[DesktopElement]:
     """Keep at most `limit` elements: focused or selected ones, then those whose
     label shares a word with the goal, inputs or criteria, then element order. The
@@ -697,12 +719,7 @@ def _cap(elements: list[DesktopElement], limit: int, subtask: Subtask) -> list[D
         return elements
     words = task_words(subtask)
 
-    def rank(item: tuple[int, DesktopElement]) -> tuple[int, int, int]:
-        index, element = item
-        label = f"{element.name} {element.value if isinstance(element.value, str) else ''}"
-        return (0 if element.focused or element.selected else 1, -len(_words(label) & words), index)
-
-    chosen = sorted(enumerate(elements), key=rank)[:limit]
+    chosen = sorted(enumerate(elements), key=lambda item: rank(item[1], words, item[0]))[:limit]
     return [element for _, element in sorted(chosen, key=lambda item: item[0])]
 
 
