@@ -7,7 +7,25 @@ from typing import Any, Mapping, Sequence
 
 import httpx
 
-from .choice import ChoicePolicy
+from .choice import ChoicePolicy, ProviderContextUnrepresentable
+
+STATE_PLUS_LONGEST_BYTES = 24_000
+COMPLETE_REQUEST_BYTES = 48_000
+
+
+def _assert_provider_bounds(body: Mapping[str, Any]) -> None:
+    """Final no-network guard; retries receive the identical already-accounted body."""
+    import json
+    encode = lambda value: json.dumps(value, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode("utf-8")
+    state = body.get("state", {})
+    questions = body.get("questions", {})
+    state_bytes = len(encode(state))
+    longest = max((len(encode(question)) for question in questions.values()), default=0)
+    total = len(encode(body))
+    if total > COMPLETE_REQUEST_BYTES or state_bytes + longest > STATE_PLUS_LONGEST_BYTES:
+        raise ProviderContextUnrepresentable("provider_context_unrepresentable: " +
+            f"state_bytes={state_bytes} longest_question_bytes={longest} state_plus_longest={state_bytes + longest} "
+            f"complete_request_bytes={total} state_plus_longest_limit={STATE_PLUS_LONGEST_BYTES} request_limit={COMPLETE_REQUEST_BYTES}")
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +64,7 @@ class TypeSafeTransport:
         return self._post({"model": self.model, "state": state, "questions": questions})
 
     def _post(self, body: Mapping[str, Any]) -> Mapping[str, Any]:
+        _assert_provider_bounds(body)
         for attempt in range(3):
             try:
                 response = self.client.post(
@@ -89,11 +108,9 @@ class TypeSafeJevPolicy(ChoicePolicy):
         client: httpx.Client | None = None,
         invalid_retries: int = 1,
     ) -> None:
-        super().__init__(
-            TypeSafeTransport(api_key=api_key, model=model, base_url=base_url, timeout_s=timeout_s, client=client),
-            max_candidates=max_candidates,
-            invalid_retries=invalid_retries,
-        )
+        transport = TypeSafeTransport(api_key=api_key, model=model, base_url=base_url, timeout_s=timeout_s, client=client)
+        super().__init__(transport, max_candidates=max_candidates, invalid_retries=invalid_retries,
+                         provider_budget=(STATE_PLUS_LONGEST_BYTES, COMPLETE_REQUEST_BYTES), request_model=transport.model)
 
 
 def _provider_error_type(response: httpx.Response) -> str | None:

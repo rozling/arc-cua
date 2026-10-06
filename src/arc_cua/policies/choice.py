@@ -10,7 +10,10 @@ from __future__ import annotations
 import math
 import re
 import time
+from copy import deepcopy
 from typing import Any, Mapping, Protocol, Sequence
+
+from .packing import closure, relevant, task_words
 
 from ..models import (
     CLICK_MODIFIERS,
@@ -129,6 +132,12 @@ class InvalidChoiceResponse(ValueError):
     """The provider's answer failed validation; no action was executed."""
 
 
+class ProviderContextUnrepresentable(ValueError):
+    """The required coherent provider projection cannot fit configured bounds."""
+
+    code = "provider_context_unrepresentable"
+
+
 class ChoicePolicy:
     """Dynamic operation/target decision policy, modeled after jev-ultrafast's heads.
 
@@ -144,6 +153,8 @@ class ChoicePolicy:
         screenshot_checks: bool = False,
         screenshot_steps: bool = False,
         invalid_retries: int = 1,
+        provider_budget: tuple[int, int] | None = None,
+        request_model: str | None = None,
     ) -> None:
         if (screenshot_checks or screenshot_steps) and not getattr(transport, "supports_images", False):
             raise ValueError(f"{transport.name} does not accept images; remove the screenshot options")
@@ -153,6 +164,8 @@ class ChoicePolicy:
         self.screenshot_steps = screenshot_steps
         # An answer that fails validation executes nothing, so the same question is asked again.
         self.invalid_retries = invalid_retries
+        self.provider_budget = provider_budget
+        self.request_model = request_model
 
     def decide(
         self,
@@ -189,6 +202,10 @@ class ChoicePolicy:
             "recent_actions": summarize_history(history, secrets=secrets),
             "candidate_truncation": meta,
         }
+        if self.provider_budget:
+            questions, candidate_maps, state = self._pack_provider_request(
+                subtask, snapshot, history, questions, candidate_maps, meta, state,
+            )
 
         counts = {name: len(question["criteria"]) for name, question in questions.items()}
         started = time.perf_counter()
@@ -236,6 +253,9 @@ class ChoicePolicy:
                 if unverified:
                     operation = TerminalKind.NEEDS_AGENT
                     reason = "Completion criteria not verified: " + "; ".join(unverified)
+                elif state.get("provider_projection_partial"):
+                    operation = TerminalKind.NEEDS_AGENT
+                    reason = "Completion cannot be established from a partial provider projection."
             return Decision(
                 terminal=TerminalKind(operation),
                 confidence=min(used),
@@ -314,10 +334,88 @@ class ChoicePolicy:
             **kwargs,
         )
 
+    def _pack_provider_request(self, subtask: Subtask, snapshot: DesktopSnapshot, history: Sequence[ActionRecord],
+                               questions: dict[str, Any], candidate_maps: dict[str, dict[str, Any]],
+                               meta: dict[str, int], state: dict[str, Any]) -> tuple[dict[str, Any], dict[str, dict[str, Any]], dict[str, Any]]:
+        """Bound TypeSafe's coherent state/questions without changing non-opted-in transports."""
+        max_state_longest, max_request = self.provider_budget or (0, 0)
+        if self._within_budget(state, questions, max_state_longest, max_request):
+            return questions, candidate_maps, state
+        words = task_words(subtask)
+        # Prune only optional original candidates. Input heads/literals are never
+        # regenerated or capped here.
+        for limit in range(min(self.max_candidates, len(snapshot.elements)), 0, -1):
+            trial_q, trial_maps, trial_meta = self._prune_candidate_heads(questions, candidate_maps, meta, snapshot, words, limit)
+            ids = {element_id for name, choices in trial_maps.items()
+                   if name.endswith("_target") or name.endswith("_destination") for element_id in choices}
+            required = closure(snapshot.elements, ids, words)
+            ordered = [e for e in snapshot.elements if e.visible]
+            essentials = [e for e in ordered if e.id in required]
+            # Essential overflow fails closed: optional state cannot repair it.
+            trial_state = self._state_for_elements(subtask, snapshot, history, trial_meta, essentials, partial=len(essentials) < len(ordered))
+            if not self._within_budget(trial_state, trial_q, max_state_longest, max_request):
+                continue
+            kept = list(essentials)
+            optional = [(index, element) for index, element in enumerate(ordered) if element.id not in required]
+            parents = {e.parent_id for e in essentials if e.parent_id}
+            optional.sort(key=lambda item: (0 if relevant(item[1], words) else 1,
+                                             0 if item[1].actions else 1,
+                                             0 if item[1].parent_id in parents else 1, item[0]))
+            for _, element in optional:
+                bundle_ids = closure(snapshot.elements, required | {element.id}, words)
+                candidate = [row for row in ordered if row.id in ({e.id for e in kept} | bundle_ids)]
+                candidate_state = self._state_for_elements(subtask, snapshot, history, trial_meta, candidate, partial=len(candidate) < len(ordered))
+                if self._within_budget(candidate_state, trial_q, max_state_longest, max_request):
+                    kept = candidate
+            return trial_q, trial_maps, self._state_for_elements(subtask, snapshot, history, trial_meta, kept, partial=len(kept) < len(ordered))
+        raise ProviderContextUnrepresentable("provider_context_unrepresentable: " +
+            f"mandatory={len(required)} visible={len(snapshot.elements)} state_plus_longest_limit={max_state_longest} request_limit={max_request}")
+
+    def _prune_candidate_heads(self, questions: dict[str, Any], maps: dict[str, dict[str, Any]], meta: dict[str, int],
+                               snapshot: DesktopSnapshot, words: set[str], limit: int) -> tuple[dict[str, Any], dict[str, dict[str, Any]], dict[str, int]]:
+        result_q, result_maps, result_meta = deepcopy(questions), deepcopy(maps), dict(meta)
+        by_id = {element.id: element for element in snapshot.elements}
+        for name, choices in maps.items():
+            if not (name.endswith("_target") or name.endswith("_destination")):
+                continue
+            ids = list(choices)
+            essential = [element_id for element_id in ids if (element := by_id.get(element_id)) and
+                         (element.focused or element.selected or relevant(element, words))]
+            ranked = sorted(enumerate(ids), key=lambda item: (
+                0 if (element := by_id.get(item[1])) and (element.focused or element.selected) else 1,
+                -len(_words((by_id[item[1]].name.split("\n", 1)[0] if by_id[item[1]].actions else by_id[item[1]].name) +
+                            (" " + str(by_id[item[1]].value) if by_id[item[1]].value is not None else "")) & words), item[0]))
+            chosen = list(dict.fromkeys([*essential, *(element_id for _, element_id in ranked[:max(1, limit)])]))
+            result_maps[name] = {element_id: choices[element_id] for element_id in ids if element_id in chosen}
+            question = name.lower()
+            if question in result_q:
+                result_q[question]["criteria"] = {element_id: f"Element {element_id} in state.desktop.elements" for element_id in result_maps[name]}
+            if len(chosen) < len(ids):
+                result_meta[name] = result_meta.get(name, 0) + len(ids) - len(chosen)
+        return result_q, result_maps, result_meta
+
+    def _state_for_elements(self, subtask: Subtask, snapshot: DesktopSnapshot, history: Sequence[ActionRecord],
+                            meta: dict[str, int], elements: Sequence[DesktopElement], *, partial: bool) -> dict[str, Any]:
+        state = {"subtask": subtask.compact(), "desktop": redact({"application": snapshot.application, "window": snapshot.window,
+            "context": dict(snapshot.context), **_element_table(elements)}, subtask.secret_values),
+            "recent_actions": summarize_history(history, secrets=subtask.secret_values), "candidate_truncation": meta}
+        if partial:
+            state["provider_projection_partial"] = True
+            state["provider_projection_note"] = "State is partial. Verification is incomplete; choose UNKNOWN, never SUBTASK_COMPLETE."
+        return state
+
+    def _within_budget(self, state: Mapping[str, Any], questions: Mapping[str, Any], state_longest: int, request_limit: int) -> bool:
+        import json
+        encode = lambda value: json.dumps(value, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode("utf-8")
+        question_bytes = [len(encode(question)) for question in questions.values()]
+        body = {"model": self.request_model, "state": state, "questions": questions}
+        return len(encode(body)) <= request_limit and len(encode(state)) + max(question_bytes, default=0) <= state_longest
+
     def _build_questions(
         self,
         subtask: Subtask,
         snapshot: DesktopSnapshot,
+        candidate_limit: int | None = None,
     ) -> tuple[dict[str, Any], dict[str, dict[str, Any]], dict[str, int]]:
         elements_by_kind: dict[ActionKind, list[DesktopElement]] = {}
         for element in snapshot.elements:
@@ -352,7 +450,7 @@ class ChoicePolicy:
         for kind, elements in elements_by_kind.items():
             if kind == ActionKind.SET_VALUE and not subtask.inputs:
                 continue
-            kept = _cap(elements, self.max_candidates, subtask)
+            kept = _cap(elements, candidate_limit or self.max_candidates, subtask)
             if len(elements) > len(kept):
                 truncation[kind.value] = len(elements) - len(kept)
             operations[kind.value] = _operation_description(kind)
@@ -414,7 +512,7 @@ class ChoicePolicy:
 
         if ActionKind.DRAG_TO.value in operations:
             destinations = [e for e in snapshot.elements if e.visible and e.enabled and e.accepts_drop]
-            destinations = _cap(destinations, self.max_candidates, subtask)
+            destinations = _cap(destinations, candidate_limit or self.max_candidates, subtask)
             if destinations:
                 candidate_maps["DRAG_TO_destination"] = {e.id: e.compact() for e in destinations}
                 questions["drag_to_destination"] = {
@@ -597,15 +695,12 @@ def _cap(elements: list[DesktopElement], limit: int, subtask: Subtask) -> list[D
     kept elements stay in element order."""
     if len(elements) <= limit:
         return elements
-    task_words = _words(" ".join([
-        subtask.goal, *subtask.verification, *subtask.constraints,
-        *(str(value) for key, value in subtask.inputs.items() if key not in subtask.secret_inputs),
-    ]))
+    words = task_words(subtask)
 
     def rank(item: tuple[int, DesktopElement]) -> tuple[int, int, int]:
         index, element = item
         label = f"{element.name} {element.value if isinstance(element.value, str) else ''}"
-        return (0 if element.focused or element.selected else 1, -len(_words(label) & task_words), index)
+        return (0 if element.focused or element.selected else 1, -len(_words(label) & words), index)
 
     chosen = sorted(enumerate(elements), key=rank)[:limit]
     return [element for _, element in sorted(chosen, key=lambda item: item[0])]
