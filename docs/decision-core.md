@@ -94,7 +94,8 @@ uv run --locked --extra dev --extra decision-core pytest tests/test_decision_cor
   tests/test_provider_packing.py tests/test_bounded_decisions.py
 ```
 
-A private historical replay in the existing packing suite remains unavailable and
-skipped; it is neither copied nor used by this migration. Model qualification,
+The existing packing suite also replays its locally retained, hash-pinned private
+fixture in place when available. It is not copied into this migration or sent to
+a provider. Portable bridge evidence comes from the committed synthetic goldens. Model qualification,
 provider spend, private payloads, native application acceptance and deployment are
 separate work. This repository has no CI workflow at the inspected base.
