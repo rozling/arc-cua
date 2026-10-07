@@ -559,3 +559,6 @@ python examples/browser_demo.py https://en.wikipedia.org \
 ## Roadmap
 
 AX + OCR covers native and Electron desktop workflows. The next perception frontier is custom graphical interfaces — video timelines, CAD canvases, node graphs, spatial drag targets — which can be added as perception providers while keeping the same `DesktopElement` and execution interfaces.
+
+An optional [decision-core provider bridge](docs/decision-core.md) reuses the
+existing choice policy with operation-local contexts and bounded provider calls.

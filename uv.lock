@@ -17,7 +17,7 @@ wheels = [
 
 [[package]]
 name = "arc-cua"
-version = "0.1.0"
+version = "0.1.1"
 source = { editable = "." }
 dependencies = [
     { name = "httpx", extra = ["http2"] },
@@ -29,6 +29,9 @@ bench = [
 ]
 browser = [
     { name = "websockets" },
+]
+decision-core = [
+    { name = "decision-core" },
 ]
 dev = [
     { name = "pytest" },
@@ -43,6 +46,7 @@ macos = [
 
 [package.metadata]
 requires-dist = [
+    { name = "decision-core", marker = "extra == 'decision-core'", git = "https://github.com/rozling/decision-core.git?rev=e3040f2e6ee35c8e11cd3c6e8a9d7c7b513bb0ca" },
     { name = "httpx", extras = ["http2"], specifier = ">=0.28,<1" },
     { name = "pyobjc-framework-applicationservices", marker = "extra == 'macos'", specifier = ">=11" },
     { name = "pyobjc-framework-cocoa", marker = "extra == 'macos'", specifier = ">=11" },
@@ -53,7 +57,7 @@ requires-dist = [
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.14,<1" },
     { name = "websockets", marker = "extra == 'browser'", specifier = ">=13,<18" },
 ]
-provides-extras = ["browser", "bench", "dev", "macos"]
+provides-extras = ["decision-core", "browser", "bench", "dev", "macos"]
 
 [[package]]
 name = "certifi"
@@ -72,6 +76,11 @@ sdist = { url = "https://files.pythonhosted.org/packages/d8/53/6f443c9a4a8358a93
 wheels = [
     { url = "https://files.pythonhosted.org/packages/d1/d6/3965ed04c63042e047cb6a3e6ed1a63a35087b6a609aa3a15ed8ac56c221/colorama-0.4.6-py2.py3-none-any.whl", hash = "sha256:4f1d9991f5acc0ca119f9d443620b77f9d6b33703e51011c16baf57afb285fc6", size = 25335, upload-time = "2022-10-25T02:36:20.889Z" },
 ]
+
+[[package]]
+name = "decision-core"
+version = "0.2.0"
+source = { git = "https://github.com/rozling/decision-core.git?rev=e3040f2e6ee35c8e11cd3c6e8a9d7c7b513bb0ca#e3040f2e6ee35c8e11cd3c6e8a9d7c7b513bb0ca" }
 
 [[package]]
 name = "h11"
